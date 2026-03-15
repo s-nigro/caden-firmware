@@ -22,6 +22,6 @@
 #define AUDIO_BUFFER_BYTES   (AUDIO_FRAME_SAMPLES * 2)                     // 960
 
 // ── VAD ───────────────────────────────────────────────────────────────────────
-#define VAD_ENERGY_THRESHOLD    500
+#define VAD_ENERGY_THRESHOLD    80
 #define VAD_HANGOVER_FRAMES     10
 #define WAKEWORD                "caden"

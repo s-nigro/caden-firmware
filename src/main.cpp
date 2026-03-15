@@ -1,13 +1,15 @@
 /**
- * CADEN Voice Node — PlatformIO / Arduino Framework
- * 
- * Läuft auf Wohnzimmer (Waveshare ESP32-S3-Touch-LCD-1.85C-BOX)
- * und Schlafzimmer (Waveshare ESP32-S3-AUDIO-Board).
- * 
- * Board wird per platformio.ini + -DCADEN_ROOM_ID bestimmt.
+ * CADEN Voice Node v0.3.0
+ * PlatformIO / Arduino — ESP32-S3
+ *
+ * Wohnzimmer: Waveshare ESP32-S3-Touch-LCD-1.85C-BOX
+ *   ES7210 (4-Mic ADC) + ES8311 (Speaker DAC)
+ *   I2C: SDA=11, SCL=10
+ *   I2S: MCLK=2, BCLK=48, WS=38, DIN=39, DOUT=47, PA=15
  */
 
 #include <Arduino.h>
+#include <Wire.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
@@ -18,43 +20,198 @@
 
 #include "config.h"
 
-// ── Versionierung ─────────────────────────────────────────────────────────────
-#define FIRMWARE_VERSION "0.2.0"
+#define FIRMWARE_VERSION "0.3.1"
 
-// ── Globale State ─────────────────────────────────────────────────────────────
+// ── ES7210 Mic-Codec Register ─────────────────────────────────────────────────
+#define ES7210_ADDR             0x40
+#define ES7210_RESET_REG00      0x00
+#define ES7210_MAINCLK_REG02    0x02
+#define ES7210_LRCK_DIVH_REG04  0x04
+#define ES7210_LRCK_DIVL_REG05  0x05
+#define ES7210_POWER_DOWN_REG06 0x06
+#define ES7210_OSR_REG07        0x07
+#define ES7210_TIME_CONTROL0    0x09
+#define ES7210_TIME_CONTROL1    0x0A
+#define ES7210_SDP_IFACE1       0x11
+#define ES7210_SDP_IFACE2       0x12
+#define ES7210_ADC34_HPF2       0x20
+#define ES7210_ADC34_HPF1       0x21
+#define ES7210_ADC12_HPF2       0x22
+#define ES7210_ADC12_HPF1       0x23
+#define ES7210_ANALOG_REG40     0x40
+#define ES7210_MIC12_BIAS       0x41
+#define ES7210_MIC34_BIAS       0x42
+#define ES7210_MIC1_GAIN        0x43
+#define ES7210_MIC2_GAIN        0x44
+#define ES7210_MIC3_GAIN        0x45
+#define ES7210_MIC4_GAIN        0x46
+#define ES7210_MIC1_PWR         0x47
+#define ES7210_MIC2_PWR         0x48
+#define ES7210_MIC3_PWR         0x49
+#define ES7210_MIC4_PWR         0x4A
+#define ES7210_MIC12_PWR        0x4B
+#define ES7210_MIC34_PWR        0x4C
+
+// ── ES8311 Speaker-Codec Register ─────────────────────────────────────────────
+#define ES8311_ADDR             0x18
+#define ES8311_RESET            0x00
+#define ES8311_CLK_MANAGER1     0x01
+#define ES8311_CLK_MANAGER2     0x02
+#define ES8311_CLK_MANAGER3     0x03
+#define ES8311_CLK_MANAGER4     0x04
+#define ES8311_CLK_MANAGER5     0x05
+#define ES8311_CLK_MANAGER6     0x06
+#define ES8311_CLK_MANAGER7     0x07
+#define ES8311_CLK_MANAGER8     0x08
+#define ES8311_SDPIN            0x09
+#define ES8311_SDPOUT           0x0A
+#define ES8311_SYSTEM1          0x0D
+#define ES8311_SYSTEM2          0x0E
+#define ES8311_DAC1             0x31
+#define ES8311_DAC2             0x32
+#define ES8311_ADC1             0x1C
+#define ES8311_ADC2             0x1D
+#define ES8311_ANALOG1          0x37
+#define ES8311_ANALOG2          0x38
+#define ES8311_CHD1_ADCVOL      0x17
+#define ES8311_DAC_VOLL         0x32
+#define ES8311_GPIO1            0x44
+#define ES8311_GP_CTL           0x45
+
+// ── Global State ──────────────────────────────────────────────────────────────
 WiFiClient   wifiClient;
 PubSubClient mqtt(wifiClient);
 
-bool         g_private_mode    = false;
-bool         g_speech_active   = false;
-int          g_hangover_count  = 0;
-uint32_t     g_last_ota_check  = 0;
+bool     g_private_mode   = false;
+bool     g_speech_active  = false;
+bool     g_ota_running    = false;
+int      g_hangover_count = 0;
+uint32_t g_last_ota_check = 0;
+int16_t  g_audio_buf[AUDIO_FRAME_SAMPLES];
 
-// Audio-Buffer
-int16_t      g_audio_buf[AUDIO_FRAME_SAMPLES];
-
-// ── MQTT Topics ───────────────────────────────────────────────────────────────
+// MQTT Topics
 const char* TOPIC_AUDIO_PUB  = "caden/nodes/" CADEN_ROOM_ID "/audio";
 const char* TOPIC_VAD_PUB    = "caden/nodes/" CADEN_ROOM_ID "/vad";
 const char* TOPIC_STATUS_PUB = "caden/nodes/" CADEN_ROOM_ID "/status";
+const char* TOPIC_DIAG_PUB   = "caden/nodes/" CADEN_ROOM_ID "/diag";
 const char* TOPIC_CMD_SUB    = "caden/nodes/" CADEN_ROOM_ID "/cmd";
 
-// ── WiFi ──────────────────────────────────────────────────────────────────────
-void wifi_connect() {
-    Serial.printf("[WiFi] Connecting to %s...\n", WIFI_SSID);
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
-    WiFi.setAutoReconnect(true);
-    
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
-    }
-    Serial.printf("\n[WiFi] Connected — IP: %s\n", WiFi.localIP().toString().c_str());
+// ── I2C Codec Helpers ─────────────────────────────────────────────────────────
+static void codec_write(uint8_t addr, uint8_t reg, uint8_t val) {
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    Wire.write(val);
+    Wire.endTransmission();
 }
 
-// ── I2S Audio ─────────────────────────────────────────────────────────────────
-void i2s_init() {
+// ── ES7210 Init (Mic-Array) ───────────────────────────────────────────────────
+// Sequenz aus Waveshare-Library + TRM
+// MCLK=4096000 @ 16kHz (256x ratio) → coeff: adc_div=1, dll=1, doubler=1, osr=0x20
+static void es7210_init() {
+    Wire.begin(I2C_SDA, I2C_SCL, 400000);
+
+    // Software Reset
+    codec_write(ES7210_ADDR, ES7210_RESET_REG00, 0xFF);
+    delay(10);
+    codec_write(ES7210_ADDR, ES7210_RESET_REG00, 0x32);
+
+    // Init timing
+    codec_write(ES7210_ADDR, ES7210_TIME_CONTROL0, 0x30);
+    codec_write(ES7210_ADDR, ES7210_TIME_CONTROL1, 0x30);
+
+    // HPF für alle 4 ADCs
+    codec_write(ES7210_ADDR, ES7210_ADC12_HPF1, 0x2A);
+    codec_write(ES7210_ADDR, ES7210_ADC12_HPF2, 0x0A);
+    codec_write(ES7210_ADDR, ES7210_ADC34_HPF1, 0x2A);
+    codec_write(ES7210_ADDR, ES7210_ADC34_HPF2, 0x0A);
+
+    // I2S Format: Standard I2S, 16-bit, kein TDM
+    codec_write(ES7210_ADDR, ES7210_SDP_IFACE1, 0x60);  // 16-bit I2S
+    codec_write(ES7210_ADDR, ES7210_SDP_IFACE2, 0x00);  // kein TDM
+
+    // Analog Power
+    codec_write(ES7210_ADDR, ES7210_ANALOG_REG40, 0xC3);
+
+    // MIC Bias 2.87V (0x07)
+    codec_write(ES7210_ADDR, ES7210_MIC12_BIAS, 0x07);
+    codec_write(ES7210_ADDR, ES7210_MIC34_BIAS, 0x07);
+
+    // MIC Gain 30dB (0x0D) | 0x10
+    codec_write(ES7210_ADDR, ES7210_MIC1_GAIN, 0x1D);
+    codec_write(ES7210_ADDR, ES7210_MIC2_GAIN, 0x1D);
+    codec_write(ES7210_ADDR, ES7210_MIC3_GAIN, 0x1D);
+    codec_write(ES7210_ADDR, ES7210_MIC4_GAIN, 0x1D);
+
+    // MIC Power On
+    codec_write(ES7210_ADDR, ES7210_MIC1_PWR, 0x08);
+    codec_write(ES7210_ADDR, ES7210_MIC2_PWR, 0x08);
+    codec_write(ES7210_ADDR, ES7210_MIC3_PWR, 0x08);
+    codec_write(ES7210_ADDR, ES7210_MIC4_PWR, 0x08);
+
+    // Clock: MCLK=4.096MHz, LRCK=16kHz → ratio 256
+    // coeff für {4096000, 16000}: adc_div=1, doubler=1, dll=1, osr=0x20, lrckh=1, lrckl=0
+    codec_write(ES7210_ADDR, ES7210_OSR_REG07,        0x20);
+    codec_write(ES7210_ADDR, ES7210_MAINCLK_REG02,    0x01 | (1 << 6) | (1 << 7)); // adc_div=1, doubler=1, dll=1
+    codec_write(ES7210_ADDR, ES7210_LRCK_DIVH_REG04,  0x01);
+    codec_write(ES7210_ADDR, ES7210_LRCK_DIVL_REG05,  0x00);
+
+    // DLL Power down
+    codec_write(ES7210_ADDR, ES7210_POWER_DOWN_REG06, 0x04);
+
+    // MIC Bias & ADC & PGA Power on
+    codec_write(ES7210_ADDR, ES7210_MIC12_PWR, 0x0F);
+    codec_write(ES7210_ADDR, ES7210_MIC34_PWR, 0x0F);
+
+    // Enable
+    codec_write(ES7210_ADDR, ES7210_RESET_REG00, 0x71);
+    delay(5);
+    codec_write(ES7210_ADDR, ES7210_RESET_REG00, 0x41);
+
+    Serial.printf("[ES7210] Init done (I2C SDA:%d SCL:%d)\n", I2C_SDA, I2C_SCL);
+}
+
+// ── ES8311 Init (Speaker) ─────────────────────────────────────────────────────
+static void es8311_init() {
+    // Reset
+    codec_write(ES8311_ADDR, ES8311_RESET, 0x1F);
+    delay(5);
+    codec_write(ES8311_ADDR, ES8311_RESET, 0x00);
+
+    // Clock: MCLK→SCLK, 16kHz, MCLK=4.096MHz
+    codec_write(ES8311_ADDR, ES8311_CLK_MANAGER1, 0x01); // MCLK from pin
+    codec_write(ES8311_ADDR, ES8311_CLK_MANAGER2, 0x04);
+    codec_write(ES8311_ADDR, ES8311_CLK_MANAGER3, 0x10);
+    codec_write(ES8311_ADDR, ES8311_CLK_MANAGER4, 0x02);
+    codec_write(ES8311_ADDR, ES8311_CLK_MANAGER5, 0x00);
+    codec_write(ES8311_ADDR, ES8311_CLK_MANAGER6, 0x03); // BCLK div
+    codec_write(ES8311_ADDR, ES8311_CLK_MANAGER7, 0x00);
+    codec_write(ES8311_ADDR, ES8311_CLK_MANAGER8, 0xFF); // LAUTO_MUTE_CTL
+
+    // I2S Slave, 16-bit standard
+    codec_write(ES8311_ADDR, ES8311_SDPIN,  0x00); // ADC: I2S 16bit
+    codec_write(ES8311_ADDR, ES8311_SDPOUT, 0x00); // DAC: I2S 16bit
+
+    // Analog
+    codec_write(ES8311_ADDR, ES8311_SYSTEM1,  0x0C);
+    codec_write(ES8311_ADDR, ES8311_SYSTEM2,  0x00);
+    codec_write(ES8311_ADDR, ES8311_ANALOG1,  0x08);
+    codec_write(ES8311_ADDR, ES8311_ANALOG2,  0x03);
+
+    // DAC volume (70%)
+    codec_write(ES8311_ADDR, ES8311_DAC1, 0x00);
+    codec_write(ES8311_ADDR, ES8311_DAC2, 0xBF); // 0dB
+
+    // Power Amplifier
+#if defined(CODEC_PA_PIN) && (CODEC_PA_PIN >= 0)
+    pinMode(CODEC_PA_PIN, OUTPUT);
+    digitalWrite(CODEC_PA_PIN, HIGH);
+#endif
+
+    Serial.println("[ES8311] Init done");
+}
+
+// ── I2S Init ──────────────────────────────────────────────────────────────────
+static void i2s_init() {
     i2s_config_t cfg = {
         .mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_TX),
         .sample_rate          = AUDIO_SAMPLE_RATE,
@@ -66,87 +223,108 @@ void i2s_init() {
         .dma_buf_len          = AUDIO_FRAME_SAMPLES,
         .use_apll             = true,
         .tx_desc_auto_clear   = true,
+        .mclk_multiple        = I2S_MCLK_MULTIPLE_256,
     };
-
     i2s_pin_config_t pins = {
+        .mck_io_num   = I2S_MCLK,
         .bck_io_num   = I2S_BCLK,
         .ws_io_num    = I2S_WS,
         .data_out_num = I2S_DOUT,
         .data_in_num  = I2S_DIN,
     };
-
     ESP_ERROR_CHECK(i2s_driver_install(I2S_NUM_0, &cfg, 0, NULL));
     ESP_ERROR_CHECK(i2s_set_pin(I2S_NUM_0, &pins));
     ESP_ERROR_CHECK(i2s_zero_dma_buffer(I2S_NUM_0));
-
-#if defined(CODEC_PA_PIN) && (CODEC_PA_PIN >= 0)
-    pinMode(CODEC_PA_PIN, OUTPUT);
-    digitalWrite(CODEC_PA_PIN, HIGH);
-#endif
-
-    Serial.printf("[I2S] Init — BCLK:%d WS:%d DIN:%d DOUT:%d @ %dHz\n",
-                  I2S_BCLK, I2S_WS, I2S_DIN, I2S_DOUT, AUDIO_SAMPLE_RATE);
+    Serial.printf("[I2S] MCLK:%d BCLK:%d WS:%d DIN:%d DOUT:%d @ %dHz\n",
+                  I2S_MCLK, I2S_BCLK, I2S_WS, I2S_DIN, I2S_DOUT, AUDIO_SAMPLE_RATE);
 }
 
-// ── VAD (einfache Energie-basierte Erkennung) ─────────────────────────────────
-bool vad_detect(const int16_t *samples, int n) {
+// ── WiFi ──────────────────────────────────────────────────────────────────────
+static void wifi_connect() {
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    WiFi.setAutoReconnect(true);
+    Serial.printf("[WiFi] Connecting to %s", WIFI_SSID);
+    while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
+    Serial.printf("\n[WiFi] IP: %s RSSI: %d\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
+}
+
+// ── VAD ───────────────────────────────────────────────────────────────────────
+static bool vad_detect(const int16_t *s, int n) {
     int64_t sum = 0;
-    for (int i = 0; i < n; i++) {
-        sum += (int32_t)samples[i] * samples[i];
-    }
-    int32_t rms = (int32_t)sqrt((double)sum / n);
-    return rms > VAD_ENERGY_THRESHOLD;
+    for (int i = 0; i < n; i++) sum += (int32_t)s[i] * s[i];
+    return (int32_t)sqrt((double)sum / n) > VAD_ENERGY_THRESHOLD;
 }
 
-// ── MQTT Callbacks ────────────────────────────────────────────────────────────
+// ── OTA Task ──────────────────────────────────────────────────────────────────
+void ota_task(void *arg) {
+    HTTPClient http;
+    String url = String("http://") + OTA_HOST + ":" + OTA_PORT + "/check/" + CADEN_ROOM_ID;
+    http.begin(url);
+    if (http.GET() != 200) { http.end(); g_ota_running = false; vTaskDelete(NULL); return; }
+
+    JsonDocument doc;
+    if (deserializeJson(doc, http.getString()) != DeserializationError::Ok || !doc["update_available"].as<bool>()) {
+        http.end(); g_ota_running = false; vTaskDelete(NULL); return;
+    }
+    http.end();
+
+    if (strcmp(doc["version"].as<const char*>(), FIRMWARE_VERSION) == 0) {
+        g_ota_running = false; vTaskDelete(NULL); return;
+    }
+
+    Serial.printf("[OTA] Update: %s → %s\n", FIRMWARE_VERSION, doc["version"].as<const char*>());
+    HTTPClient fw;
+    fw.begin(doc["url"].as<String>());
+    if (fw.GET() == 200) {
+        int sz = fw.getSize();
+        if (Update.begin(sz)) {
+            if (Update.writeStream(fw.getStream()) && Update.end() && Update.isFinished()) {
+                fw.end(); ESP.restart();
+            }
+        }
+    }
+    fw.end();
+    g_ota_running = false;
+    vTaskDelete(NULL);
+}
+
+static void ota_check() {
+    if (g_ota_running || millis() - g_last_ota_check < OTA_CHECK_MS) return;
+    g_last_ota_check = millis();
+    g_ota_running = true;
+    xTaskCreate(ota_task, "caden_ota", 8192, NULL, 1, NULL);
+}
+
+// ── MQTT ──────────────────────────────────────────────────────────────────────
 void mqtt_callback(char* topic, byte* payload, unsigned int len) {
-    // JSON parsen
     JsonDocument doc;
     if (deserializeJson(doc, payload, len) != DeserializationError::Ok) return;
-
     const char* cmd = doc["cmd"];
     if (!cmd) return;
 
-    if (strcmp(cmd, "private_on") == 0) {
-        g_private_mode = true;
-        Serial.println("[CMD] Private mode ON");
-
-    } else if (strcmp(cmd, "private_off") == 0) {
-        g_private_mode = false;
-        Serial.println("[CMD] Private mode OFF");
-
-    } else if (strcmp(cmd, "volume") == 0) {
-        int vol = doc["value"] | 70;
-        Serial.printf("[CMD] Volume → %d\n", vol);
-        // TODO: ES8311 volume via I2C
-
-    } else if (strcmp(cmd, "reboot") == 0) {
-        Serial.println("[CMD] Reboot...");
-        delay(500);
-        ESP.restart();
-
-    } else if (strcmp(cmd, "ota_now") == 0) {
-        Serial.println("[CMD] OTA forced by CADEN");
-        g_last_ota_check = 0;  // Beim nächsten Loop OTA checken
+    if      (!strcmp(cmd, "private_on"))  { g_private_mode = true;  Serial.println("[CMD] Private ON"); }
+    else if (!strcmp(cmd, "private_off")) { g_private_mode = false; Serial.println("[CMD] Private OFF"); }
+    else if (!strcmp(cmd, "reboot"))      { delay(300); ESP.restart(); }
+    else if (!strcmp(cmd, "ota_now"))     {
+        g_last_ota_check = 0;
+        if (!g_ota_running) { g_ota_running = true; xTaskCreate(ota_task, "caden_ota", 8192, NULL, 1, NULL); }
     }
 }
 
-void mqtt_connect() {
-    String clientId = String("caden-") + CADEN_ROOM_ID;
+static void mqtt_connect() {
+    String cid = String("caden-") + CADEN_ROOM_ID;
     while (!mqtt.connected()) {
-        Serial.printf("[MQTT] Connecting as %s...\n", clientId.c_str());
-        if (mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_PASS)) {
+        if (mqtt.connect(cid.c_str(), MQTT_USER, MQTT_PASS)) {
             mqtt.subscribe(TOPIC_CMD_SUB);
-            Serial.printf("[MQTT] Connected — subscribed to %s\n", TOPIC_CMD_SUB);
+            Serial.printf("[MQTT] Connected — %s\n", TOPIC_CMD_SUB);
         } else {
-            Serial.printf("[MQTT] Failed (rc=%d) — retry in 3s\n", mqtt.state());
             delay(3000);
         }
     }
 }
 
-// ── Status publizieren ────────────────────────────────────────────────────────
-void publish_status() {
+static void publish_status() {
     JsonDocument doc;
     doc["version"] = FIRMWARE_VERSION;
     doc["room"]    = CADEN_ROOM_ID;
@@ -154,150 +332,82 @@ void publish_status() {
     doc["heap"]    = ESP.getFreeHeap();
     doc["uptime"]  = millis() / 1000;
     doc["private"] = g_private_mode;
-
-    char buf[256];
-    serializeJson(doc, buf);
+    char buf[256]; serializeJson(doc, buf);
     mqtt.publish(TOPIC_STATUS_PUB, buf, true);
 }
 
-// ── OTA Check ────────────────────────────────────────────────────────────────
-void ota_check() {
-    if (millis() - g_last_ota_check < OTA_CHECK_MS) return;
-    g_last_ota_check = millis();
-
-    HTTPClient http;
-    String url = String("http://") + OTA_HOST + ":" + OTA_PORT + "/check/" + CADEN_ROOM_ID;
-    http.begin(url);
-    int code = http.GET();
-
-    if (code != 200) { http.end(); return; }
-
-    JsonDocument doc;
-    if (deserializeJson(doc, http.getString()) != DeserializationError::Ok) { http.end(); return; }
-    http.end();
-
-    if (!doc["update_available"].as<bool>()) return;
-
-    const char* newVer = doc["version"];
-    if (strcmp(newVer, FIRMWARE_VERSION) == 0) return;  // Gleiche Version
-
-    Serial.printf("[OTA] Update verfügbar: %s → %s\n", FIRMWARE_VERSION, newVer);
-
-    // Firmware herunterladen + flashen
-    String fwUrl = doc["url"].as<String>();
-    HTTPClient fwHttp;
-    fwHttp.begin(fwUrl);
-    int fwCode = fwHttp.GET();
-
-    if (fwCode == 200) {
-        int fwSize = fwHttp.getSize();
-        if (Update.begin(fwSize)) {
-            WiFiClient& stream = fwHttp.getStream();
-            size_t written = Update.writeStream(stream);
-            if (Update.end() && Update.isFinished()) {
-                Serial.printf("[OTA] Flash OK (%d bytes) — reboot\n", written);
-                fwHttp.end();
-                ESP.restart();
-            }
-        }
-    }
-    fwHttp.end();
-}
-
 // ── Audio Loop ────────────────────────────────────────────────────────────────
-void audio_loop() {
+static uint32_t g_last_rms_report = 0;
+
+static void audio_loop() {
     if (g_private_mode) return;
-
     size_t bytes_read = 0;
-    esp_err_t err = i2s_read(I2S_NUM_0, g_audio_buf,
-                              AUDIO_BUFFER_BYTES, &bytes_read, pdMS_TO_TICKS(30));
-    if (err != ESP_OK || bytes_read == 0) return;
+    if (i2s_read(I2S_NUM_0, g_audio_buf, AUDIO_BUFFER_BYTES, &bytes_read, pdMS_TO_TICKS(30)) != ESP_OK) return;
+    if (bytes_read == 0) return;
 
-    bool speech = vad_detect(g_audio_buf, AUDIO_FRAME_SAMPLES);
+    // RMS
+    int64_t sum = 0;
+    for (int i = 0; i < AUDIO_FRAME_SAMPLES; i++) sum += (int32_t)g_audio_buf[i] * g_audio_buf[i];
+    int32_t rms = (int32_t)sqrt((double)sum / AUDIO_FRAME_SAMPLES);
 
-    // Hangover: kurze Pausen überbrücken
-    if (speech) {
-        g_hangover_count = VAD_HANGOVER_FRAMES;
-    } else if (g_hangover_count > 0) {
-        g_hangover_count--;
-        speech = true;  // Noch als aktiv behandeln
+    // RMS alle 3s reporten
+    if (millis() - g_last_rms_report > 3000) {
+        g_last_rms_report = millis();
+        char buf[48]; snprintf(buf, sizeof(buf), "{\"rms\":%d,\"thr\":%d}", rms, VAD_ENERGY_THRESHOLD);
+        mqtt.publish(TOPIC_DIAG_PUB, buf);
     }
 
-    // VAD-State-Change publizieren
+    bool speech = rms > VAD_ENERGY_THRESHOLD;
+    if (speech) g_hangover_count = VAD_HANGOVER_FRAMES;
+    else if (g_hangover_count > 0) { g_hangover_count--; speech = true; }
+
     if (speech != g_speech_active) {
         g_speech_active = speech;
-
-        JsonDocument doc;
-        doc["state"]  = speech ? 1 : 0;
-        doc["room"]   = CADEN_ROOM_ID;
-        char buf[64];
-        serializeJson(doc, buf);
+        char buf[64]; snprintf(buf, sizeof(buf), "{\"state\":%d,\"room\":\"%s\"}", speech ? 1 : 0, CADEN_ROOM_ID);
         mqtt.publish(TOPIC_VAD_PUB, buf);
     }
-
-    // Audio nur bei aktiver Sprache streamen
-    if (speech && mqtt.connected()) {
-        mqtt.publish(TOPIC_AUDIO_PUB,
-                     (const uint8_t*)g_audio_buf, AUDIO_BUFFER_BYTES);
-    }
+    if (speech && mqtt.connected())
+        mqtt.publish(TOPIC_AUDIO_PUB, (const uint8_t*)g_audio_buf, AUDIO_BUFFER_BYTES);
 }
 
-// ── Arduino Setup ─────────────────────────────────────────────────────────────
+// ── Setup & Loop ──────────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
-    delay(500);
-    Serial.printf("\n[CADEN] Voice Node v%s — Room: %s\n",
-                  FIRMWARE_VERSION, CADEN_ROOM_ID);
+    delay(300);
+    Serial.printf("\n[CADEN] v%s — %s\n", FIRMWARE_VERSION, CADEN_ROOM_ID);
 
     wifi_connect();
 
-    // Arduino OTA (für schnelles Dev-Flashing per WiFi)
     ArduinoOTA.setHostname("caden-" CADEN_ROOM_ID);
-    ArduinoOTA.onStart([]() { Serial.println("[OTA] Start"); });
-    ArduinoOTA.onEnd([]()   { Serial.println("[OTA] Done — reboot"); });
-    ArduinoOTA.onError([](ota_error_t e) {
-        Serial.printf("[OTA] Error[%u]\n", e);
-    });
     ArduinoOTA.begin();
 
+    // Codec Init (I2C muss vor I2S)
+    es7210_init();
+    es8311_init();
+    delay(50);
+
+    // I2S
     i2s_init();
 
     mqtt.setServer(MQTT_HOST, MQTT_PORT);
     mqtt.setCallback(mqtt_callback);
-    mqtt.setBufferSize(1024);  // Für Audio-Chunks
+    mqtt.setBufferSize(1200);
     mqtt_connect();
-
     publish_status();
 
-    Serial.println("[CADEN] Ready — listening 👂");
+    Serial.println("[CADEN] Ready 👂");
 }
 
-// ── Arduino Loop ──────────────────────────────────────────────────────────────
 void loop() {
-    // WiFi-Reconnect
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("[WiFi] Reconnecting...");
-        WiFi.reconnect();
-        delay(1000);
-        return;
-    }
-
-    // MQTT-Reconnect
-    if (!mqtt.connected()) {
-        mqtt_connect();
-    }
+    if (WiFi.status() != WL_CONNECTED) { WiFi.reconnect(); delay(1000); return; }
+    if (!mqtt.connected()) mqtt_connect();
 
     ArduinoOTA.handle();
     mqtt.loop();
     audio_loop();
 
-    // Status alle 30s
     static uint32_t last_status = 0;
-    if (millis() - last_status > 30000) {
-        last_status = millis();
-        publish_status();
-    }
+    if (millis() - last_status > 30000) { last_status = millis(); publish_status(); }
 
-    // OTA-Check alle 5min
     ota_check();
 }
