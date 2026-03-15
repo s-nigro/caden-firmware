@@ -19,8 +19,11 @@
 #include <Update.h>
 
 #include "config.h"
+#include <Preferences.h>
 
-#define FIRMWARE_VERSION "0.3.1"
+#define FIRMWARE_VERSION "0.3.2"
+
+Preferences prefs;
 
 // ── ES7210 Mic-Codec Register ─────────────────────────────────────────────────
 #define ES7210_ADDR             0x40
@@ -88,6 +91,7 @@ bool     g_ota_running    = false;
 int      g_hangover_count = 0;
 uint32_t g_last_ota_check = 0;
 int16_t  g_audio_buf[AUDIO_FRAME_SAMPLES];
+int32_t  g_vad_threshold  = VAD_ENERGY_THRESHOLD;  // Dynamisch, aus NVS geladen
 
 // MQTT Topics
 const char* TOPIC_AUDIO_PUB  = "caden/nodes/" CADEN_ROOM_ID "/audio";
@@ -306,6 +310,25 @@ void mqtt_callback(char* topic, byte* payload, unsigned int len) {
     if      (!strcmp(cmd, "private_on"))  { g_private_mode = true;  Serial.println("[CMD] Private ON"); }
     else if (!strcmp(cmd, "private_off")) { g_private_mode = false; Serial.println("[CMD] Private OFF"); }
     else if (!strcmp(cmd, "reboot"))      { delay(300); ESP.restart(); }
+    else if (!strcmp(cmd, "set_threshold")) {
+        int val = doc["value"] | -1;
+        if (val > 0 && val < 10000) {
+            g_vad_threshold = val;
+            prefs.begin("caden", false);
+            prefs.putInt("vad_thr", val);
+            prefs.end();
+            Serial.printf("[CMD] VAD threshold → %d\n", val);
+            // Bestätigung publizieren
+            char buf[64];
+            snprintf(buf, sizeof(buf), "{\"vad_threshold\":%d}", val);
+            mqtt.publish(TOPIC_DIAG_PUB, buf);
+        }
+    }
+    else if (!strcmp(cmd, "get_threshold")) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "{\"vad_threshold\":%d}", g_vad_threshold);
+        mqtt.publish(TOPIC_DIAG_PUB, buf);
+    }
     else if (!strcmp(cmd, "ota_now"))     {
         g_last_ota_check = 0;
         if (!g_ota_running) { g_ota_running = true; xTaskCreate(ota_task, "caden_ota", 8192, NULL, 1, NULL); }
@@ -331,7 +354,8 @@ static void publish_status() {
     doc["rssi"]    = WiFi.RSSI();
     doc["heap"]    = ESP.getFreeHeap();
     doc["uptime"]  = millis() / 1000;
-    doc["private"] = g_private_mode;
+    doc["private"]        = g_private_mode;
+    doc["vad_threshold"]  = g_vad_threshold;
     char buf[256]; serializeJson(doc, buf);
     mqtt.publish(TOPIC_STATUS_PUB, buf, true);
 }
@@ -353,11 +377,11 @@ static void audio_loop() {
     // RMS alle 3s reporten
     if (millis() - g_last_rms_report > 3000) {
         g_last_rms_report = millis();
-        char buf[48]; snprintf(buf, sizeof(buf), "{\"rms\":%d,\"thr\":%d}", rms, VAD_ENERGY_THRESHOLD);
+        char buf[64]; snprintf(buf, sizeof(buf), "{\"rms\":%d,\"vad_threshold\":%d}", rms, g_vad_threshold);
         mqtt.publish(TOPIC_DIAG_PUB, buf);
     }
 
-    bool speech = rms > VAD_ENERGY_THRESHOLD;
+    bool speech = rms > g_vad_threshold;
     if (speech) g_hangover_count = VAD_HANGOVER_FRAMES;
     else if (g_hangover_count > 0) { g_hangover_count--; speech = true; }
 
@@ -375,6 +399,12 @@ void setup() {
     Serial.begin(115200);
     delay(300);
     Serial.printf("\n[CADEN] v%s — %s\n", FIRMWARE_VERSION, CADEN_ROOM_ID);
+
+    // NVS: gespeicherte Einstellungen laden
+    prefs.begin("caden", true);
+    g_vad_threshold = prefs.getInt("vad_thr", VAD_ENERGY_THRESHOLD);
+    prefs.end();
+    Serial.printf("[CFG] VAD threshold: %d (default: %d)\n", g_vad_threshold, VAD_ENERGY_THRESHOLD);
 
     wifi_connect();
 
