@@ -1,0 +1,5 @@
+.pio/
+.vscode/
+include/credentials.h
+*.bin
+*.elf
