@@ -1,34 +1,26 @@
 #pragma once
 /**
- * CADEN Display — MQTT-driven Renderer
- * Waveshare ESP32-S3-Touch-LCD-1.85C-BOX (ST7789 240x280, CST816 Touch)
+ * CADEN Display Driver — Waveshare ESP32-S3-Touch-LCD-1.85C-BOX
  *
- * Der ESP rendert nur was er per MQTT bekommt.
- * Alle Logik (States, Enrollment, Alerts) liegt auf dem Mac Mini.
+ * Controller:  ST77916, QSPI 4-bit
+ * Resolution:  360 x 360
+ * Touch:       CST816, I2C (GPIO10/11)
+ * GPIO Expander: TCA9554 (I2C 0x20) — LCD_RST=EXIO2, TP_RST=EXIO1
  *
- * Subscribe: caden/nodes/<room>/display  → JSON Render-Command
- * Publish:   caden/nodes/<room>/touch    → {"event":"tap","x":120,"y":140}
- *
- * Render-Command Schema:
- * {
- *   "state":    "ready|listening|thinking|speaking|private|ota|error",
- *   "icon":     "MIC",          // 1-4 Zeichen, im Ring
- *   "label":    "BEREIT",       // Haupttext unter Ring
- *   "color":    [40,80,200],    // RGB override (optional)
- *   "person":   "Sascha",       // Sprecher-Zeile (optional)
- *   "progress": {               // Fortschrittsbalken (optional)
- *     "value":  3,
- *     "total":  8,
- *     "label":  "Enrollment"
- *   },
- *   "alert": {                  // Overlay-Nachricht (optional)
- *     "text":  "WiFi verloren",
- *     "level": "info|warning|alert",
- *     "ttl":   4000             // ms bis auto-dismiss (0 = permanent)
- *   },
- *   "weather": {"temp": 8, "desc": "bewoelkt"},
- *   "dim":     180              // Helligkeit 0-255 (optional)
- * }
+ * Pin-Mapping (aus Waveshare Wiki):
+ *   LCD_SDA0  → GPIO46   (QSPI D0)
+ *   LCD_SDA1  → GPIO45   (QSPI D1)
+ *   LCD_SDA2  → GPIO42   (QSPI D2)
+ *   LCD_SDA3  → GPIO41   (QSPI D3)
+ *   LCD_SCK   → GPIO40
+ *   LCD_CS    → GPIO21
+ *   LCD_TE    → GPIO18
+ *   LCD_BL    → GPIO5    (PWM Backlight)
+ *   LCD_RST   → TCA9554 EXIO2
+ *   TP_SDA    → GPIO11   (shared I2C)
+ *   TP_SCL    → GPIO10   (shared I2C)
+ *   TP_INT    → GPIO4
+ *   TP_RST    → TCA9554 EXIO1
  */
 
 #if defined(CADEN_HAS_DISPLAY) && (CADEN_HAS_DISPLAY == 1)
@@ -37,24 +29,29 @@
 #include <LovyanGFX.hpp>
 #include <ArduinoJson.h>
 
-// ── Waveshare ESP32-S3-Touch-LCD-1.85C Pin-Belegung ─────────────────────────
-// ACHTUNG: SPI-Pins müssen vom Board-Schaltplan kommen — ggf. anpassen
-#define DISP_SPI_MOSI  13
-#define DISP_SPI_SCLK  12
-#define DISP_SPI_CS    10
-#define DISP_DC         9
-#define DISP_RST        8
-#define DISP_BL        48   // PWM Backlight
-#define DISP_W        240
-#define DISP_H        280
+// ── Pins ─────────────────────────────────────────────────────────────────────
+#define DISP_QSPI_D0    46
+#define DISP_QSPI_D1    45
+#define DISP_QSPI_D2    42
+#define DISP_QSPI_D3    41
+#define DISP_SCK        40
+#define DISP_CS         21
+#define DISP_TE         18
+#define DISP_BL          5
+#define DISP_W         360
+#define DISP_H         360
 
-// Touch CST816 (I2C, shared mit Codec-Bus)
-#define TOUCH_I2C_ADDR 0x15
-#define TOUCH_INT_PIN  16
-#define TOUCH_RST_PIN  17
+// Touch CST816
+#define TOUCH_I2C_ADDR  0x15
+#define TOUCH_INT_PIN    4
+
+// TCA9554 GPIO Expander (I2C 0x20)
+#define TCA9554_ADDR    0x20
+#define EXIO_LCD_RST     2   // EXIO2
+#define EXIO_TP_RST      1   // EXIO1
 
 void display_init();
 void display_handle_mqtt(const char* payload, size_t len);
-void display_tick();   // aus loop() aufrufen — Animationen + Touch-Poll
+void display_tick();
 
-#endif // CADEN_HAS_DISPLAY
+#endif
