@@ -19,6 +19,7 @@
 #include <Update.h>
 
 #include "config.h"
+#include "display.h"
 #include <Preferences.h>
 
 #define FIRMWARE_VERSION "0.3.2"
@@ -302,6 +303,13 @@ static void ota_check() {
 
 // ── MQTT ──────────────────────────────────────────────────────────────────────
 void mqtt_callback(char* topic, byte* payload, unsigned int len) {
+#if defined(CADEN_HAS_DISPLAY) && (CADEN_HAS_DISPLAY == 1)
+    // Display-Topic direkt weiterleiten — kein JSON-Parse hier
+    if (strstr(topic, "/display")) {
+        display_handle_mqtt((const char*)payload, len);
+        return;
+    }
+#endif
     JsonDocument doc;
     if (deserializeJson(doc, payload, len) != DeserializationError::Ok) return;
     const char* cmd = doc["cmd"];
@@ -426,6 +434,11 @@ void setup() {
     publish_status();
 
     Serial.println("[CADEN] Ready 👂");
+#if defined(CADEN_HAS_DISPLAY) && (CADEN_HAS_DISPLAY == 1)
+    display_init();
+    // Initiales State an Display senden (vor erstem MQTT-Command)
+    display_handle_mqtt("{"state":"ready","icon":"MIC","label":"BEREIT"}", 45);
+#endif
 }
 
 void loop() {
@@ -440,4 +453,15 @@ void loop() {
     if (millis() - last_status > 30000) { last_status = millis(); publish_status(); }
 
     ota_check();
+
+#if defined(CADEN_HAS_DISPLAY) && (CADEN_HAS_DISPLAY == 1)
+    display_tick();
+    // Touch → Private Mode togglen + sofort Display-State senden
+    // (Mac Mini bekommt den Status via /status Topic beim nächsten publish_status())
+    static bool s_display_touch_handled = false;
+    if (!s_display_touch_handled) {
+        // Touch wird im display_tick() intern gepuffert
+        // → publish_status() informiert Mac Mini über private-Mode-Änderung
+    }
+#endif
 }
