@@ -14,6 +14,7 @@
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <ArduinoOTA.h>
+#include <esp_ota_ops.h>
 #include <driver/i2s.h>
 #include <HTTPClient.h>
 #include <Update.h>
@@ -22,7 +23,7 @@
 #include "display.h"
 #include <Preferences.h>
 
-#define FIRMWARE_VERSION "0.4.1"
+#define FIRMWARE_VERSION "0.4.2"
 
 Preferences prefs;
 
@@ -486,6 +487,8 @@ void setup() {
     mqtt.setBufferSize(1200);
     mqtt_connect();
     publish_status();
+    // OTA Rollback verhindern — Firmware als valid markieren
+    esp_ota_mark_app_valid_cancel_rollback();
 
     Serial.println("[CADEN] Ready 👂");
 #if defined(CADEN_HAS_DISPLAY) && (CADEN_HAS_DISPLAY == 1)
