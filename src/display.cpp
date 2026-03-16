@@ -352,7 +352,7 @@ void display_init() {
     host.data4_io_num  = -1; host.data5_io_num=-1;
     host.data6_io_num  = -1; host.data7_io_num=-1;
     host.max_transfer_sz = LCD_W * LCD_BUF_LINES * 2 + 64;
-    host.flags = SPICOMMON_BUSFLAG_MASTER;
+    host.flags = SPICOMMON_BUSFLAG_MASTER | SPICOMMON_BUSFLAG_QUAD;
     ESP_ERROR_CHECK(spi_bus_initialize(LCD_SPI_HOST, &host, SPI_DMA_CH_AUTO));
 
     // Panel IO (niedrige CLK für Init, dann erhöhen)
@@ -360,10 +360,12 @@ void display_init() {
     io_cfg.cs_gpio_num       = LCD_CS;
     io_cfg.dc_gpio_num       = -1;
     io_cfg.spi_mode          = 0;
-    io_cfg.pclk_hz           = 5 * 1000 * 1000;  // Niedrig für Init-Phase
+    io_cfg.pclk_hz           = 5 * 1000 * 1000;
     io_cfg.trans_queue_depth = LCD_QUEUE_DEPTH;
     io_cfg.lcd_cmd_bits      = LCD_CMD_BITS;
     io_cfg.lcd_param_bits    = LCD_PARAM_BITS;
+    io_cfg.flags.dc_low_on_data  = 0;
+    io_cfg.flags.octal_mode      = 0;
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(
         (esp_lcd_spi_bus_handle_t)LCD_SPI_HOST, &io_cfg, &s_io));
 
