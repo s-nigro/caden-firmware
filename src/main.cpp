@@ -262,14 +262,15 @@ static bool vad_detect(const int16_t *s, int n) {
 }
 
 // ── OTA Task ──────────────────────────────────────────────────────────────────
+static void ota_pub_diag(const char* msg) {
+    char buf[128];
+    snprintf(buf, sizeof(buf), "{\"ota\":\"%s\",\"version\":\"%s\"}", msg, FIRMWARE_VERSION);
+    mqtt.publish(TOPIC_DIAG_PUB, buf);
+    Serial.printf("[OTA] %s\n", msg);
+}
+
 void ota_task(void *arg) {
-    auto pub_diag = [](const char* msg) {
-        extern PubSubClient mqtt;
-        char buf[128];
-        snprintf(buf, sizeof(buf), "{\"ota\":\"%s\",\"version\":\"%s\"}", msg, FIRMWARE_VERSION);
-        mqtt.publish(TOPIC_DIAG_PUB, buf);
-        Serial.printf("[OTA] %s\n", msg);
-    };
+    auto pub_diag = ota_pub_diag;
 
     // 1. Check-Endpoint abfragen
     String check_url = String("http://") + OTA_HOST + ":" + OTA_PORT + "/check/" + CADEN_ROOM_ID;
