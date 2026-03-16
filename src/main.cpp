@@ -268,13 +268,17 @@ void ota_task(void *arg) {
     http.begin(url);
     if (http.GET() != 200) { http.end(); g_ota_running = false; vTaskDelete(NULL); return; }
 
-    JsonDocument doc;
-    if (deserializeJson(doc, http.getString()) != DeserializationError::Ok || !doc["update_available"].as<bool>()) {
-        http.end(); g_ota_running = false; vTaskDelete(NULL); return;
-    }
+    String body = http.getString();
     http.end();
 
-    if (strcmp(doc["version"].as<const char*>(), FIRMWARE_VERSION) == 0) {
+    JsonDocument doc;
+    if (deserializeJson(doc, body) != DeserializationError::Ok || !doc["update_available"].as<bool>()) {
+        g_ota_running = false; vTaskDelete(NULL); return;
+    }
+
+    String remote_ver = doc["version"].as<String>();
+    if (remote_ver == FIRMWARE_VERSION) {
+        Serial.printf("[OTA] Already up to date (%s)\n", FIRMWARE_VERSION);
         g_ota_running = false; vTaskDelete(NULL); return;
     }
 
