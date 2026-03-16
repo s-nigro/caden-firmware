@@ -107,7 +107,8 @@ static const st77916_lcd_init_cmd_t s_vendor_init[] = {
 // ── State ─────────────────────────────────────────────────────────────────────
 static esp_lcd_panel_io_handle_t s_io   = NULL;
 static esp_lcd_panel_handle_t    s_panel = NULL;
-static uint16_t* s_fb = NULL;
+static uint16_t* s_fb  = NULL;   // Framebuffer im PSRAM (253KB)
+static uint16_t* s_dma = NULL;   // DMA-Puffer im DRAM (10 Zeilen = 7.2KB)
 
 struct RenderState {
     char    state[16]   = "ready";
@@ -304,11 +305,11 @@ static void render() {
         fb_text_c(118,s.alert_text,rgb(210,215,225),1);
     }
 
-    // Push via DMA (in Streifen)
-    int lines = LCD_BUF_LINES;
-    for(int y=0;y<LCD_H;y+=lines) {
-        int h = min(lines, LCD_H-y);
-        esp_lcd_panel_draw_bitmap(s_panel, 0, y, LCD_W, y+h, s_fb + y*LCD_W);
+    // Push via DMA — FB liegt in PSRAM, DMA braucht DRAM-Puffer
+    for(int y=0;y<LCD_H;y+=LCD_BUF_LINES) {
+        int h = min(LCD_BUF_LINES, LCD_H-y);
+        memcpy(s_dma, s_fb + y*LCD_W, h * LCD_W * 2);
+        esp_lcd_panel_draw_bitmap(s_panel, 0, y, LCD_W, y+h, s_dma);
     }
 }
 
@@ -381,16 +382,16 @@ void display_init() {
     esp_lcd_panel_init(s_panel);
     esp_lcd_panel_disp_on_off(s_panel, true);
 
-    // Framebuffer — PSRAM bevorzugt (253KB passt nicht in DRAM)
+    // Framebuffer in PSRAM (253KB — passt nicht in DRAM)
     s_fb = (uint16_t*)heap_caps_malloc(LCD_W * LCD_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if(!s_fb) {
-        // Fallback auf DRAM (funktioniert nur wenn genug frei)
-        s_fb = (uint16_t*)heap_caps_malloc(LCD_W * LCD_H * 2, MALLOC_CAP_DMA);
-    }
-    if(!s_fb){ Serial.println("[Display] ERROR: OOM — kein Framebuffer"); return; }
-    Serial.printf("[Display] FB: %d KB in %s\n",
-        LCD_W * LCD_H * 2 / 1024,
-        heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0 ? "PSRAM" : "DRAM");
+    if(!s_fb){ Serial.println("[Display] ERROR: PSRAM alloc failed"); return; }
+
+    // DMA-Puffer in DRAM (10 Zeilen, 7.2KB) — DMA kann nicht direkt aus PSRAM lesen
+    s_dma = (uint16_t*)heap_caps_malloc(LCD_W * LCD_BUF_LINES * 2, MALLOC_CAP_DMA);
+    if(!s_dma){ Serial.println("[Display] ERROR: DMA buf alloc failed"); return; }
+
+    Serial.printf("[Display] FB: %dKB PSRAM, DMA buf: %dKB DRAM\n",
+        LCD_W*LCD_H*2/1024, LCD_W*LCD_BUF_LINES*2/1024);
 
     // Backlight voll
     ledcWrite(1, 900);
@@ -400,8 +401,11 @@ void display_init() {
     fb_fill(bg);
     fb_text_c(152,"CADEN",rgb(40,80,200),3);
     fb_text_c(182,CADEN_ROOM_ID,rgb(70,75,90),2);
-    for(int y=0;y<LCD_H;y+=LCD_BUF_LINES)
-        esp_lcd_panel_draw_bitmap(s_panel,0,y,LCD_W,min(y+LCD_BUF_LINES,LCD_H),s_fb+y*LCD_W);
+    for(int y=0;y<LCD_H;y+=LCD_BUF_LINES) {
+        int h=min(LCD_BUF_LINES,LCD_H-y);
+        memcpy(s_dma, s_fb+y*LCD_W, h*LCD_W*2);
+        esp_lcd_panel_draw_bitmap(s_panel,0,y,LCD_W,y+h,s_dma);
+    }
 
     delay(1500);
     Serial.println("[Display] ST77916 360x360 ready");
