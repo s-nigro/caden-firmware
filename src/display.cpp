@@ -381,9 +381,16 @@ void display_init() {
     esp_lcd_panel_init(s_panel);
     esp_lcd_panel_disp_on_off(s_panel, true);
 
-    // Framebuffer (DMA-fähig)
-    s_fb = (uint16_t*)heap_caps_malloc(LCD_W * LCD_H * 2, MALLOC_CAP_DMA);
-    if(!s_fb){ Serial.println("[Display] ERROR: OOM"); return; }
+    // Framebuffer — PSRAM bevorzugt (253KB passt nicht in DRAM)
+    s_fb = (uint16_t*)heap_caps_malloc(LCD_W * LCD_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(!s_fb) {
+        // Fallback auf DRAM (funktioniert nur wenn genug frei)
+        s_fb = (uint16_t*)heap_caps_malloc(LCD_W * LCD_H * 2, MALLOC_CAP_DMA);
+    }
+    if(!s_fb){ Serial.println("[Display] ERROR: OOM — kein Framebuffer"); return; }
+    Serial.printf("[Display] FB: %d KB in %s\n",
+        LCD_W * LCD_H * 2 / 1024,
+        heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0 ? "PSRAM" : "DRAM");
 
     // Backlight voll
     ledcWrite(1, 900);
