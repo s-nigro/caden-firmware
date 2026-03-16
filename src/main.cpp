@@ -437,7 +437,7 @@ void setup() {
 #if defined(CADEN_HAS_DISPLAY) && (CADEN_HAS_DISPLAY == 1)
     display_init();
     // Initiales State an Display senden (vor erstem MQTT-Command)
-    display_handle_mqtt("{"state":"ready","icon":"MIC","label":"BEREIT"}", 45);
+    const char* _init_disp = "{\"state\":\"ready\",\"icon\":\"MIC\",\"label\":\"BEREIT\"}"; display_handle_mqtt(_init_disp, strlen(_init_disp));
 #endif
 }
 
