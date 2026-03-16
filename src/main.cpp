@@ -263,46 +263,93 @@ static bool vad_detect(const int16_t *s, int n) {
 
 // ── OTA Task ──────────────────────────────────────────────────────────────────
 void ota_task(void *arg) {
-    HTTPClient http;
-    String url = String("http://") + OTA_HOST + ":" + OTA_PORT + "/check/" + CADEN_ROOM_ID;
-    http.begin(url);
-    if (http.GET() != 200) { http.end(); g_ota_running = false; vTaskDelete(NULL); return; }
+    auto pub_diag = [](const char* msg) {
+        extern PubSubClient mqtt;
+        char buf[128];
+        snprintf(buf, sizeof(buf), "{\"ota\":\"%s\",\"version\":\"%s\"}", msg, FIRMWARE_VERSION);
+        mqtt.publish(TOPIC_DIAG_PUB, buf);
+        Serial.printf("[OTA] %s\n", msg);
+    };
 
+    // 1. Check-Endpoint abfragen
+    String check_url = String("http://") + OTA_HOST + ":" + OTA_PORT + "/check/" + CADEN_ROOM_ID;
+    HTTPClient http;
+    http.setTimeout(8000);
+    if (!http.begin(check_url)) {
+        pub_diag("http_begin_failed");
+        g_ota_running = false; vTaskDelete(NULL); return;
+    }
+    int code = http.GET();
+    if (code != 200) {
+        char m[48]; snprintf(m, sizeof(m), "check_failed_http%d", code);
+        pub_diag(m);
+        http.end(); g_ota_running = false; vTaskDelete(NULL); return;
+    }
     String body = http.getString();
     http.end();
 
+    // 2. JSON parsen
     JsonDocument doc;
-    if (deserializeJson(doc, body) != DeserializationError::Ok || !doc["update_available"].as<bool>()) {
+    if (deserializeJson(doc, body) != DeserializationError::Ok) {
+        pub_diag("json_parse_failed");
+        g_ota_running = false; vTaskDelete(NULL); return;
+    }
+    if (!doc["update_available"].as<bool>()) {
+        pub_diag("up_to_date");
         g_ota_running = false; vTaskDelete(NULL); return;
     }
 
-    String remote_ver = doc["version"].as<String>();
-    if (remote_ver == FIRMWARE_VERSION) {
-        Serial.printf("[OTA] Already up to date (%s)\n", FIRMWARE_VERSION);
+    // 3. Versionsvergleich (alles in Strings kopieren vor Dokument-Ende)
+    String remote_ver = doc["version"] | "";
+    String fw_url     = doc["url"]     | "";
+    if (remote_ver == FIRMWARE_VERSION || fw_url.isEmpty()) {
+        pub_diag("up_to_date");
         g_ota_running = false; vTaskDelete(NULL); return;
     }
 
-    Serial.printf("[OTA] Update: %s → %s\n", FIRMWARE_VERSION, doc["version"].as<const char*>());
+    // 4. Firmware laden
+    char upd_msg[64];
+    snprintf(upd_msg, sizeof(upd_msg), "downloading_%s", remote_ver.c_str());
+    pub_diag(upd_msg);
+
     HTTPClient fw;
-    fw.begin(doc["url"].as<String>());
-    if (fw.GET() == 200) {
-        int sz = fw.getSize();
-        if (Update.begin(sz)) {
-            if (Update.writeStream(fw.getStream()) && Update.end() && Update.isFinished()) {
-                fw.end(); ESP.restart();
-            }
-        }
+    fw.setTimeout(60000);
+    fw.begin(fw_url);
+    int fw_code = fw.GET();
+    if (fw_code != 200) {
+        char m[48]; snprintf(m, sizeof(m), "fw_fetch_failed_http%d", fw_code);
+        pub_diag(m);
+        fw.end(); g_ota_running = false; vTaskDelete(NULL); return;
     }
+    int fw_size = fw.getSize();
+    if (fw_size <= 0) {
+        pub_diag("fw_size_invalid");
+        fw.end(); g_ota_running = false; vTaskDelete(NULL); return;
+    }
+
+    pub_diag("flashing");
+    if (!Update.begin(fw_size)) {
+        pub_diag("update_begin_failed");
+        fw.end(); g_ota_running = false; vTaskDelete(NULL); return;
+    }
+    size_t written = Update.writeStream(fw.getStream());
     fw.end();
-    g_ota_running = false;
-    vTaskDelete(NULL);
+
+    if (!Update.end() || !Update.isFinished()) {
+        pub_diag("update_write_failed");
+        g_ota_running = false; vTaskDelete(NULL); return;
+    }
+
+    pub_diag("rebooting");
+    delay(500);
+    ESP.restart();
 }
 
 static void ota_check() {
     if (g_ota_running || millis() - g_last_ota_check < OTA_CHECK_MS) return;
     g_last_ota_check = millis();
     g_ota_running = true;
-    xTaskCreate(ota_task, "caden_ota", 8192, NULL, 1, NULL);
+    xTaskCreate(ota_task, "caden_ota", 16384, NULL, 1, NULL);
 }
 
 // ── MQTT ──────────────────────────────────────────────────────────────────────
@@ -343,7 +390,7 @@ void mqtt_callback(char* topic, byte* payload, unsigned int len) {
     }
     else if (!strcmp(cmd, "ota_now"))     {
         g_last_ota_check = 0;
-        if (!g_ota_running) { g_ota_running = true; xTaskCreate(ota_task, "caden_ota", 8192, NULL, 1, NULL); }
+        if (!g_ota_running) { g_ota_running = true; xTaskCreate(ota_task, "caden_ota", 16384, NULL, 1, NULL); }
     }
 }
 
