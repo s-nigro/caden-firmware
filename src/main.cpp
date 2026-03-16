@@ -22,7 +22,7 @@
 #include "display.h"
 #include <Preferences.h>
 
-#define FIRMWARE_VERSION "0.3.2"
+#define FIRMWARE_VERSION "0.4.0"
 
 Preferences prefs;
 
@@ -311,7 +311,8 @@ void ota_task(void *arg) {
     int fw_size = fw_http.getSize();
     Serial.printf("[OTA] Size: %d bytes\n", fw_size);
 
-    strlcpy(g_ota_status, "flashing", sizeof(g_ota_status));
+    snprintf(g_ota_status, sizeof(g_ota_status), "flashing_%d", fw_size);
+    vTaskDelay(pdMS_TO_TICKS(50));  // Status publishen lassen
     if (!Update.begin(fw_size > 0 ? fw_size : UPDATE_SIZE_UNKNOWN)) {
         strlcpy(g_ota_status, "begin_failed", sizeof(g_ota_status));
         fw_http.end(); g_ota_running = false; vTaskDelete(NULL); return;
@@ -331,8 +332,15 @@ void ota_task(void *arg) {
     fw_http.end();
     Serial.printf("[OTA] Written: %d / %d\n", written, fw_size);
 
-    if (!Update.end() || !Update.isFinished()) {
-        snprintf(g_ota_status, sizeof(g_ota_status), "flash_failed_%d", Update.getError());
+    snprintf(g_ota_status, sizeof(g_ota_status), "written_%d_of_%d", written, fw_size);
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    if (!Update.end(true)) {
+        snprintf(g_ota_status, sizeof(g_ota_status), "end_err_%d", (int)Update.getError());
+        g_ota_running = false; vTaskDelete(NULL); return;
+    }
+    if (!Update.isFinished()) {
+        snprintf(g_ota_status, sizeof(g_ota_status), "not_finished_%d", written);
         g_ota_running = false; vTaskDelete(NULL); return;
     }
     strlcpy(g_ota_status, "rebooting", sizeof(g_ota_status));
