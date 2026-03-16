@@ -23,7 +23,7 @@
 #include "display.h"
 #include <Preferences.h>
 
-#define FIRMWARE_VERSION "0.5.1"
+#define FIRMWARE_VERSION "0.5.2"
 
 Preferences prefs;
 
