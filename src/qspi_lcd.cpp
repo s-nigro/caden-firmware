@@ -26,7 +26,8 @@
 #define OPCODE_COLOR 0x32
 
 static const char* TAG = "qspi_lcd";
-static spi_device_handle_t s_spi = NULL;
+static spi_device_handle_t s_spi  = NULL;
+static spi_host_device_t   s_host = SPI3_HOST;
 
 // ── Transaktion senden ────────────────────────────────────────────────────────
 // cmd_word: 32-bit QSPI Command (MSB first: opcode | 00 | lcd_cmd | 00)
@@ -92,23 +93,28 @@ bool qspi_lcd_init() {
     bus.max_transfer_sz = 360 * 10 * 2 + 64;
     bus.flags = SPICOMMON_BUSFLAG_MASTER;
 
-    if (spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO) != ESP_OK) {
-        ESP_LOGE(TAG, "spi_bus_initialize failed");
-        return false;
+    s_host = SPI3_HOST;
+    esp_err_t ret = spi_bus_initialize(s_host, &bus, SPI_DMA_CH_AUTO);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "SPI3 failed (%d), trying SPI2", ret);
+        s_host = SPI2_HOST;
+        ret = spi_bus_initialize(s_host, &bus, SPI_DMA_CH_AUTO);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "SPI2 also failed (%d)", ret);
+            return false;
+        }
     }
+    ESP_LOGI(TAG, "SPI bus %d initialized", s_host);
 
     // SPI Device
     spi_device_interface_config_t dev = {};
-    dev.command_bits   = 0;
-    dev.address_bits   = 0;
-    dev.dummy_bits     = 0;
     dev.mode           = 0;
     dev.clock_speed_hz = LCD_CLK;
     dev.spics_io_num   = LCD_CS;
     dev.queue_size     = 7;
     dev.flags          = SPI_DEVICE_HALFDUPLEX | SPI_DEVICE_NO_DUMMY;
 
-    if (spi_bus_add_device(SPI2_HOST, &dev, &s_spi) != ESP_OK) {
+    if (spi_bus_add_device(s_host, &dev, &s_spi) != ESP_OK) {
         ESP_LOGE(TAG, "spi_bus_add_device failed");
         return false;
     }
