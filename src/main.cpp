@@ -23,7 +23,7 @@
 #include "display.h"
 #include <Preferences.h>
 
-#define FIRMWARE_VERSION "0.5.2"
+#define FIRMWARE_VERSION "0.5.3"
 
 Preferences prefs;
 
@@ -91,7 +91,7 @@ bool     g_private_mode   = false;
 bool     g_speech_active  = false;
 bool     g_ota_running    = false;
 int      g_hangover_count = 0;
-uint32_t g_last_ota_check = 0;
+uint32_t g_last_ota_check = 0xFFFFFFFF - 270000; // Erster Check nach 30s
 int16_t  g_audio_buf[AUDIO_FRAME_SAMPLES];
 int32_t  g_vad_threshold  = VAD_ENERGY_THRESHOLD;  // Dynamisch, aus NVS geladen
 
