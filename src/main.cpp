@@ -262,87 +262,81 @@ static bool vad_detect(const int16_t *s, int n) {
 }
 
 // ── OTA Task ──────────────────────────────────────────────────────────────────
-static void ota_pub_diag(const char* msg) {
-    char buf[128];
-    snprintf(buf, sizeof(buf), "{\"ota\":\"%s\",\"version\":\"%s\"}", msg, FIRMWARE_VERSION);
-    mqtt.publish(TOPIC_DIAG_PUB, buf);
-    Serial.printf("[OTA] %s\n", msg);
-}
+// OTA-State für MQTT-Feedback (wird aus Task gesetzt, im loop() gepublished)
+static char g_ota_status[48] = "";
 
 void ota_task(void *arg) {
-    auto pub_diag = ota_pub_diag;
-
-    // 1. Check-Endpoint abfragen
+    // 1. Check-Endpoint
     String check_url = String("http://") + OTA_HOST + ":" + OTA_PORT + "/check/" + CADEN_ROOM_ID;
+    WiFiClient wc;
     HTTPClient http;
     http.setTimeout(8000);
-    if (!http.begin(check_url)) {
-        pub_diag("http_begin_failed");
-        g_ota_running = false; vTaskDelete(NULL); return;
-    }
+    http.begin(wc, check_url);
     int code = http.GET();
     if (code != 200) {
-        char m[48]; snprintf(m, sizeof(m), "check_failed_http%d", code);
-        pub_diag(m);
+        snprintf(g_ota_status, sizeof(g_ota_status), "check_fail_%d", code);
         http.end(); g_ota_running = false; vTaskDelete(NULL); return;
     }
     String body = http.getString();
     http.end();
 
-    // 2. JSON parsen
+    // 2. JSON
     JsonDocument doc;
-    if (deserializeJson(doc, body) != DeserializationError::Ok) {
-        pub_diag("json_parse_failed");
+    if (deserializeJson(doc, body) != DeserializationError::Ok
+        || !doc["update_available"].as<bool>()) {
+        strlcpy(g_ota_status, "up_to_date", sizeof(g_ota_status));
         g_ota_running = false; vTaskDelete(NULL); return;
     }
-    if (!doc["update_available"].as<bool>()) {
-        pub_diag("up_to_date");
-        g_ota_running = false; vTaskDelete(NULL); return;
-    }
-
-    // 3. Versionsvergleich (alles in Strings kopieren vor Dokument-Ende)
     String remote_ver = doc["version"] | "";
     String fw_url     = doc["url"]     | "";
     if (remote_ver == FIRMWARE_VERSION || fw_url.isEmpty()) {
-        pub_diag("up_to_date");
+        strlcpy(g_ota_status, "up_to_date", sizeof(g_ota_status));
         g_ota_running = false; vTaskDelete(NULL); return;
     }
 
-    // 4. Firmware laden
-    char upd_msg[64];
-    snprintf(upd_msg, sizeof(upd_msg), "downloading_%s", remote_ver.c_str());
-    pub_diag(upd_msg);
+    // 3. Download + Flash via Update
+    snprintf(g_ota_status, sizeof(g_ota_status), "downloading_%s", remote_ver.c_str());
+    Serial.printf("[OTA] %s -> %s\n[OTA] URL: %s\n",
+                  FIRMWARE_VERSION, remote_ver.c_str(), fw_url.c_str());
 
-    HTTPClient fw;
-    fw.setTimeout(60000);
-    fw.begin(fw_url);
-    int fw_code = fw.GET();
+    WiFiClient fw_wc;
+    HTTPClient fw_http;
+    fw_http.setTimeout(60000);
+    fw_http.begin(fw_wc, fw_url);
+    int fw_code = fw_http.GET();
     if (fw_code != 200) {
-        char m[48]; snprintf(m, sizeof(m), "fw_fetch_failed_http%d", fw_code);
-        pub_diag(m);
-        fw.end(); g_ota_running = false; vTaskDelete(NULL); return;
+        snprintf(g_ota_status, sizeof(g_ota_status), "fw_fail_%d", fw_code);
+        fw_http.end(); g_ota_running = false; vTaskDelete(NULL); return;
     }
-    int fw_size = fw.getSize();
-    if (fw_size <= 0) {
-        pub_diag("fw_size_invalid");
-        fw.end(); g_ota_running = false; vTaskDelete(NULL); return;
-    }
+    int fw_size = fw_http.getSize();
+    Serial.printf("[OTA] Size: %d bytes\n", fw_size);
 
-    pub_diag("flashing");
-    if (!Update.begin(fw_size)) {
-        pub_diag("update_begin_failed");
-        fw.end(); g_ota_running = false; vTaskDelete(NULL); return;
+    strlcpy(g_ota_status, "flashing", sizeof(g_ota_status));
+    if (!Update.begin(fw_size > 0 ? fw_size : UPDATE_SIZE_UNKNOWN)) {
+        strlcpy(g_ota_status, "begin_failed", sizeof(g_ota_status));
+        fw_http.end(); g_ota_running = false; vTaskDelete(NULL); return;
     }
-    size_t written = Update.writeStream(fw.getStream());
-    fw.end();
+    WiFiClient& stream = fw_http.getStream();
+    uint8_t buf[512];
+    int written = 0;
+    while (fw_http.connected() || stream.available()) {
+        int avail = stream.available();
+        if (avail > 0) {
+            int r = stream.readBytes(buf, min(avail, (int)sizeof(buf)));
+            if (Update.write(buf, r) != (size_t)r) break;
+            written += r;
+        }
+        vTaskDelay(1);
+    }
+    fw_http.end();
+    Serial.printf("[OTA] Written: %d / %d\n", written, fw_size);
 
     if (!Update.end() || !Update.isFinished()) {
-        pub_diag("update_write_failed");
+        snprintf(g_ota_status, sizeof(g_ota_status), "flash_failed_%d", Update.getError());
         g_ota_running = false; vTaskDelete(NULL); return;
     }
-
-    pub_diag("rebooting");
-    delay(500);
+    strlcpy(g_ota_status, "rebooting", sizeof(g_ota_status));
+    vTaskDelay(pdMS_TO_TICKS(300));
     ESP.restart();
 }
 
@@ -505,6 +499,15 @@ void loop() {
     if (millis() - last_status > 30000) { last_status = millis(); publish_status(); }
 
     ota_check();
+
+    // OTA-Status publizieren wenn gesetzt
+    if (g_ota_status[0]) {
+        char buf[96];
+        snprintf(buf, sizeof(buf), "{\"ota\":\"%s\",\"v\":\"%s\"}", g_ota_status, FIRMWARE_VERSION);
+        mqtt.publish(TOPIC_DIAG_PUB, buf);
+        Serial.printf("[OTA-STATUS] %s\n", g_ota_status);
+        g_ota_status[0] = '\0';
+    }
 
 #if defined(CADEN_HAS_DISPLAY) && (CADEN_HAS_DISPLAY == 1)
     display_tick();
