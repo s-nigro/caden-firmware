@@ -23,7 +23,7 @@
 #include "display.h"
 #include <Preferences.h>
 
-#define FIRMWARE_VERSION "0.4.9"
+#define FIRMWARE_VERSION "0.5.0"
 
 Preferences prefs;
 
@@ -494,14 +494,9 @@ void setup() {
 
     Serial.println("[CADEN] Ready 👂");
 #if defined(CADEN_HAS_DISPLAY) && (CADEN_HAS_DISPLAY == 1)
-    // Display-Init in eigenem Task — crash hier rollt NICHT zurück (OTA-Valid bereits gesetzt)
-    xTaskCreate([](void*) {
-        delay(500);  // Warten bis alles stabil
-        display_init();
-        const char* _d = "{\"state\":\"ready\",\"icon\":\"MIC\",\"label\":\"BEREIT\"}";
-        display_handle_mqtt(_d, strlen(_d));
-        vTaskDelete(NULL);
-    }, "display_init", 8192, NULL, 1, NULL);
+    // Display direkt im setup() — OTA-Valid ist bereits gesetzt, kein Rollback-Risiko
+    display_init();
+    display_handle_mqtt("{\"state\":\"ready\",\"icon\":\"MIC\",\"label\":\"BEREIT\"}", 47);
 #endif
 }
 

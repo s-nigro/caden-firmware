@@ -107,8 +107,9 @@ static const st77916_lcd_init_cmd_t s_vendor_init[] = {
 // ── State ─────────────────────────────────────────────────────────────────────
 static esp_lcd_panel_io_handle_t s_io   = NULL;
 static esp_lcd_panel_handle_t    s_panel = NULL;
-static uint16_t* s_fb  = NULL;   // Framebuffer im PSRAM (253KB)
-static uint16_t* s_dma = NULL;   // DMA-Puffer im DRAM (10 Zeilen = 7.2KB)
+static uint16_t*    s_fb   = NULL;
+static uint16_t*    s_dma  = NULL;
+static SemaphoreHandle_t s_mutex = NULL;
 
 struct RenderState {
     char    state[16]   = "ready";
@@ -233,7 +234,8 @@ static uint16_t mc() {
 }
 
 static void render() {
-    if(!s_fb||!s_panel) return;
+    if(!s_fb||!s_panel||!s_mutex) return;
+    if(xSemaphoreTake(s_mutex, pdMS_TO_TICKS(200)) != pdTRUE) return;
     uint16_t bg  = rgb(10,12,20);
     uint16_t dim = rgb(70,75,90);
     uint16_t mcv = mc();
@@ -311,6 +313,7 @@ static void render() {
         memcpy(s_dma, s_fb + y*LCD_W, h * LCD_W * 2);
         esp_lcd_panel_draw_bitmap(s_panel, 0, y, LCD_W, y+h, s_dma);
     }
+    xSemaphoreGive(s_mutex);
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
@@ -392,6 +395,7 @@ void display_init() {
 
     Serial.printf("[Display] FB: %dKB PSRAM, DMA buf: %dKB DRAM\n",
         LCD_W*LCD_H*2/1024, LCD_W*LCD_BUF_LINES*2/1024);
+    s_mutex = xSemaphoreCreateMutex();
 
     // Backlight voll
     ledcWrite(1, 900);
