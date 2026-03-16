@@ -23,7 +23,7 @@
 #include "display.h"
 #include <Preferences.h>
 
-#define FIRMWARE_VERSION "0.4.6"
+#define FIRMWARE_VERSION "0.4.7"
 
 Preferences prefs;
 
@@ -100,7 +100,8 @@ const char* TOPIC_AUDIO_PUB  = "caden/nodes/" CADEN_ROOM_ID "/audio";
 const char* TOPIC_VAD_PUB    = "caden/nodes/" CADEN_ROOM_ID "/vad";
 const char* TOPIC_STATUS_PUB = "caden/nodes/" CADEN_ROOM_ID "/status";
 const char* TOPIC_DIAG_PUB   = "caden/nodes/" CADEN_ROOM_ID "/diag";
-const char* TOPIC_CMD_SUB    = "caden/nodes/" CADEN_ROOM_ID "/cmd";
+const char* TOPIC_CMD_SUB        = "caden/nodes/" CADEN_ROOM_ID "/cmd";
+const char* TOPIC_DISPLAY_SUB    = "caden/nodes/" CADEN_ROOM_ID "/display";
 
 // ── I2C Codec Helpers ─────────────────────────────────────────────────────────
 static void codec_write(uint8_t addr, uint8_t reg, uint8_t val) {
@@ -403,6 +404,7 @@ static void mqtt_connect() {
     while (!mqtt.connected()) {
         if (mqtt.connect(cid.c_str(), MQTT_USER, MQTT_PASS)) {
             mqtt.subscribe(TOPIC_CMD_SUB);
+            mqtt.subscribe(TOPIC_DISPLAY_SUB);
             Serial.printf("[MQTT] Connected — %s\n", TOPIC_CMD_SUB);
         } else {
             delay(3000);
